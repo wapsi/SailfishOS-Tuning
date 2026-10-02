@@ -1,0 +1,387 @@
+#!/usr/bin/env python3
+"""Read-only Sailfish OS contact-name lookup helper.
+
+Usage:
+    sailfish-contact-lookup PHONE_NUMBER
+
+Output:
+    Prints the display name from the first best-ranked matching contact.
+    Prints nothing when there is no matching contact.
+
+Exit status:
+    0 = a contact was found
+    1 = no contact was found
+    2 = configuration, permission, database, or usage error
+
+This helper is intended to be installed root-owned and invoked via sudo by a
+less-privileged service. It never writes to the contacts database.
+"""
+
+import argparse
+import os
+import re
+import sqlite3
+import sys
+from dataclasses import dataclass
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
+
+# -----------------------------------------------------------------------------
+# Configuration
+# -----------------------------------------------------------------------------
+CONTACTS_DB = (
+    "/home/defaultuser/.local/share/system/privileged/Contacts/"
+    "qtcontacts-sqlite/contacts.db"
+)
+
+# International/national variants are compared by their trailing digits only
+# after exact normalized matching has been attempted. Eight digits is usually
+# enough to bridge Finnish 0... and +358... representations while avoiding
+# excessively loose matching.
+MIN_SUFFIX_DIGITS = 8
+
+# Refuse unreasonable input before it reaches SQLite.
+MIN_PHONE_DIGITS = 3
+MAX_PHONE_DIGITS = 20
+
+
+@dataclass(frozen=True)
+class ContactMatch:
+    contact_id: int
+    name: str
+    stored_number: str
+    match_length: int
+    exact: bool
+
+
+def eprint(message: str) -> None:
+    print(message, file=sys.stderr, flush=True)
+
+
+def quote_identifier(identifier: str) -> str:
+    """Safely quote an SQLite identifier discovered from the DB schema."""
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+def normalize_phone_number(value: str) -> str:
+    """Return digits only, normalizing 00 international prefix to digits."""
+    value = value.strip()
+    if not value or "\x00" in value:
+        return ""
+    # Reject letters and shell/SQL-like junk. Formatting punctuation is fine.
+    if re.search(r"[^0-9+()./\\\s-]", value):
+        return ""
+    digits = re.sub(r"\D", "", value)
+    if digits.startswith("00"):
+        digits = digits[2:]
+    return digits
+
+
+def open_contacts_database(path: str) -> sqlite3.Connection:
+    if not os.path.isabs(path):
+        raise ValueError("contacts database path must be absolute")
+    # mode=ro prevents writes while still allowing SQLite to inspect WAL data.
+    uri_path = path.replace("?", "%3f").replace("#", "%23")
+    connection = sqlite3.connect(
+        f"file:{uri_path}?mode=ro",
+        uri=True,
+        timeout=5.0,
+    )
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA query_only = ON")
+    connection.execute("PRAGMA busy_timeout = 5000")
+    return connection
+
+
+def table_columns(db: sqlite3.Connection, table: str) -> Set[str]:
+    table_q = quote_identifier(table)
+    return {
+        str(row["name"])
+        for row in db.execute(f"PRAGMA table_info({table_q})")
+    }
+
+
+def find_column(columns: Set[str], candidates: Sequence[str]) -> Optional[str]:
+    by_lower = {column.lower(): column for column in columns}
+    for candidate in candidates:
+        found = by_lower.get(candidate.lower())
+        if found:
+            return found
+    return None
+
+
+def verify_schema(db: sqlite3.Connection) -> Dict[str, str]:
+    tables = {
+        str(row["name"])
+        for row in db.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )
+    }
+    required = {"PhoneNumbers", "Contacts"}
+    missing = required - tables
+    if missing:
+        raise RuntimeError(
+            "unsupported contacts database schema; missing table(s): "
+            + ", ".join(sorted(missing))
+        )
+
+    phone_columns = table_columns(db, "PhoneNumbers")
+    contact_columns = table_columns(db, "Contacts")
+    phone_contact_id = find_column(phone_columns, ("contactId", "contact_id"))
+    phone_number = find_column(
+        phone_columns,
+        ("phoneNumber", "number", "normalizedNumber", "normalized_number"),
+    )
+    contacts_contact_id = find_column(
+        contact_columns, ("contactId", "contact_id", "id")
+    )
+    if not phone_contact_id or not phone_number or not contacts_contact_id:
+        raise RuntimeError(
+            "unsupported contacts database schema; required contact/phone "
+            "columns were not found"
+        )
+
+    schema = {
+        "phone_contact_id": phone_contact_id,
+        "phone_number": phone_number,
+        "contacts_contact_id": contacts_contact_id,
+    }
+
+    if "DisplayLabels" in tables:
+        display_columns = table_columns(db, "DisplayLabels")
+        display_contact_id = find_column(
+            display_columns, ("contactId", "contact_id")
+        )
+        display_label = find_column(
+            display_columns, ("displayLabel", "display_label", "label")
+        )
+        if display_contact_id and display_label:
+            schema["display_contact_id"] = display_contact_id
+            schema["display_label"] = display_label
+
+    if "Names" in tables:
+        name_columns = table_columns(db, "Names")
+        name_contact_id = find_column(name_columns, ("contactId", "contact_id"))
+        first_name = find_column(
+            name_columns, ("firstName", "first_name", "givenName", "given_name")
+        )
+        last_name = find_column(
+            name_columns, ("lastName", "last_name", "familyName", "family_name")
+        )
+        middle_name = find_column(
+            name_columns, ("middleName", "middle_name")
+        )
+        prefix = find_column(name_columns, ("prefix", "namePrefix"))
+        suffix = find_column(name_columns, ("suffix", "nameSuffix"))
+        if name_contact_id:
+            schema["name_contact_id"] = name_contact_id
+            if first_name:
+                schema["first_name"] = first_name
+            if last_name:
+                schema["last_name"] = last_name
+            if middle_name:
+                schema["middle_name"] = middle_name
+            if prefix:
+                schema["name_prefix"] = prefix
+            if suffix:
+                schema["name_suffix"] = suffix
+
+    if "display_label" not in schema and not any(
+        key in schema for key in ("first_name", "last_name", "middle_name")
+    ):
+        raise RuntimeError(
+            "unsupported contacts database schema; no usable display-name "
+            "columns were found"
+        )
+    return schema
+
+
+def build_contact_query(schema: Dict[str, str]) -> str:
+    p_cid = quote_identifier(schema["phone_contact_id"])
+    p_num = quote_identifier(schema["phone_number"])
+    c_cid = quote_identifier(schema["contacts_contact_id"])
+
+    select_parts = [
+        f"p.{p_cid} AS contact_id",
+        f"p.{p_num} AS phone_number",
+    ]
+    joins = [
+        f"JOIN {quote_identifier('Contacts')} AS c "
+        f"ON c.{c_cid} = p.{p_cid}"
+    ]
+
+    if "display_label" in schema:
+        dl_cid = quote_identifier(schema["display_contact_id"])
+        dl_label = quote_identifier(schema["display_label"])
+        joins.append(
+            f"LEFT JOIN {quote_identifier('DisplayLabels')} AS dl "
+            f"ON dl.{dl_cid} = p.{p_cid}"
+        )
+        select_parts.append(f"dl.{dl_label} AS display_label")
+    else:
+        select_parts.append("NULL AS display_label")
+
+    if "name_contact_id" in schema:
+        n_cid = quote_identifier(schema["name_contact_id"])
+        joins.append(
+            f"LEFT JOIN {quote_identifier('Names')} AS n "
+            f"ON n.{n_cid} = p.{p_cid}"
+        )
+        for key in (
+            "name_prefix", "first_name", "middle_name", "last_name", "name_suffix"
+        ):
+            if key in schema:
+                column = quote_identifier(schema[key])
+                select_parts.append(f"n.{column} AS {quote_identifier(key)}")
+            else:
+                select_parts.append(f"NULL AS {quote_identifier(key)}")
+    else:
+        for key in (
+            "name_prefix", "first_name", "middle_name", "last_name", "name_suffix"
+        ):
+            select_parts.append(f"NULL AS {quote_identifier(key)}")
+
+    return (
+        "SELECT " + ", ".join(select_parts)
+        + f" FROM {quote_identifier('PhoneNumbers')} AS p "
+        + " ".join(joins)
+        + f" WHERE p.{p_num} IS NOT NULL"
+    )
+
+
+def clean_name(value: object) -> str:
+    if value is None:
+        return ""
+    return " ".join(str(value).split()).strip()
+
+
+def row_name(row: sqlite3.Row) -> str:
+    display = clean_name(row["display_label"])
+    if display:
+        return display
+    parts = [
+        clean_name(row[key])
+        for key in (
+            "name_prefix", "first_name", "middle_name", "last_name", "name_suffix"
+        )
+    ]
+    return " ".join(part for part in parts if part).strip()
+
+
+def compare_numbers(wanted: str, stored: str) -> Optional[Tuple[bool, int]]:
+    candidate = normalize_phone_number(stored)
+    if not candidate:
+        return None
+    if candidate == wanted:
+        return True, len(wanted)
+    common = min(len(candidate), len(wanted))
+    if common < MIN_SUFFIX_DIGITS:
+        return None
+    if candidate[-common:] == wanted[-common:]:
+        return False, common
+    return None
+
+
+def lookup_contact(db: sqlite3.Connection, wanted: str) -> List[ContactMatch]:
+    schema = verify_schema(db)
+    query = build_contact_query(schema)
+    best_for_contact: Dict[int, ContactMatch] = {}
+
+    for row in db.execute(query):
+        stored_number = clean_name(row["phone_number"])
+        comparison = compare_numbers(wanted, stored_number)
+        if comparison is None:
+            continue
+        name = row_name(row)
+        if not name:
+            continue
+        exact, match_length = comparison
+        match = ContactMatch(
+            contact_id=int(row["contact_id"]),
+            name=name,
+            stored_number=stored_number,
+            match_length=match_length,
+            exact=exact,
+        )
+        previous = best_for_contact.get(match.contact_id)
+        if previous is None or (match.exact, match.match_length) > (
+            previous.exact,
+            previous.match_length,
+        ):
+            best_for_contact[match.contact_id] = match
+
+    matches = list(best_for_contact.values())
+    if not matches:
+        return []
+
+    # Exact normalized matches always outrank suffix matches. Otherwise retain
+    # only contacts tied for the longest matching suffix.
+    best_rank = max((match.exact, match.match_length) for match in matches)
+    return [
+        match
+        for match in matches
+        if (match.exact, match.match_length) == best_rank
+    ]
+
+
+def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Look up a Sailfish contact display name by phone number."
+    )
+    parser.add_argument("phone_number", help="phone number to look up")
+    parser.add_argument(
+        "--database",
+        default=CONTACTS_DB,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="write lookup details to stderr",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = parse_args(argv)
+    wanted = normalize_phone_number(args.phone_number)
+    if not (MIN_PHONE_DIGITS <= len(wanted) <= MAX_PHONE_DIGITS):
+        eprint("invalid phone number")
+        return 2
+
+    try:
+        with open_contacts_database(args.database) as db:
+            matches = lookup_contact(db, wanted)
+    except (OSError, sqlite3.Error, RuntimeError, ValueError) as exc:
+        eprint(f"contact lookup failed: {exc}")
+        return 2
+
+    if args.debug:
+        if matches:
+            for match in matches:
+                eprint(
+                    f"contact_id={match.contact_id} name={match.name!r} "
+                    f"stored_number={match.stored_number!r} "
+                    f"exact={match.exact} match_length={match.match_length}"
+                )
+        else:
+            eprint("no matching contact")
+
+    if not matches:
+        return 1
+
+    # Matches are already restricted to the best rank: exact normalized
+    # matches first, otherwise the longest matching suffix. If duplicate or
+    # separate contacts remain, intentionally use the first database result.
+    selected = matches[0]
+    if args.debug and len(matches) > 1:
+        eprint(
+            f"multiple best-ranked contacts matched; selecting first: "
+            f"contact_id={selected.contact_id} name={selected.name!r}"
+        )
+
+    print(selected.name)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

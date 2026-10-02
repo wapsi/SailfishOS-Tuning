@@ -1,0 +1,59 @@
+# This script (or set of scripts) allows forwarding SMS messages to Matrix
+# and automatically dismissing SMS notifications if the Matrix message
+# was sent successfully.
+# It's one-way sync, but it's quite handy when you receive 2FA codes as SMS to your Matrix client(s) instead of the local Sailfish Messages app
+
+
+The files contains compiled binary of sailfish-contact-lookup-wrapper.c, if you want to compile it by your own, then you can do it (on your ARM/Jolla device for example):
+gcc -O2 -o sailfish-contact-lookup-wrapper sailfish-contact-lookup-wrapper.c
+
+
+Update the correct Matrix server address, room id, and access token into sms-to-matrix-and-close-notification.py
+
+Then copy the entire SmsToMatrix directory to:
+/home/defaultuser/Scripts/SmsToMatrix
+
+Then:
+
+cd /home/defaultuser/Scripts/SmsToMatrix
+
+
+As root:
+
+cp sailfish-contact-lookup /usr/local/sbin/sailfish-contact-lookup
+
+chown root:root /usr/local/sbin/sailfish-contact-lookup-wrapper
+chmod 755 /usr/local/sbin/sailfish-contact-lookup-wrapper
+
+cp sailfish-contact-lookup-wrapper /usr/local/sbin/sailfish-contact-lookup-wrapper
+
+chown root:root /usr/local/sbin/sailfish-contact-lookup-wrapper
+chmod 4755 /usr/local/sbin/sailfish-contact-lookup-wrapper
+
+
+As the default user:
+
+mkdir -p ~/.config/systemd/user
+
+cat > ~/.config/systemd/user/sms-to-matrix-and-close-notification.service <<'EOF'
+[Unit]
+Description=SMS to Matrix
+After=graphical-session.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/defaultuser/Scripts/SmsToMatrix
+ExecStart=/usr/bin/python3 /home/defaultuser/Scripts/SmsToMatrix/sms-to-matrix-and-close-notification.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+EOF
+
+systemctl --user daemon-reload
+systemctl --user enable sms-to-matrix-and-close-notification.service
+systemctl --user start sms-to-matrix-and-close-notification.service
+systemctl --user status sms-to-matrix-and-close-notification.service
+
+devel-su journalctl -f _SYSTEMD_USER_UNIT=sms-to-matrix-and-close-notification.service
