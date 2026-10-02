@@ -1,0 +1,50 @@
+--- TopMenu.qml.orig
++++ /usr/share/lipstick-jolla-home-qt5/topmenu/TopMenu.qml
+@@ -144,6 +144,47 @@
+                     ? (Screen.topCutout.height + Theme.paddingSmall) : 0
+         }
+
++        // Current date shown at the top of the Top Menu.
++        Item {
++            id: dateHeader
++
++            width: topMenu.width
++            height: Theme.itemSizeMedium
++
++            property date currentDate: new Date()
++
++            Row {
++                anchors.centerIn: parent
++                spacing: Theme.paddingMedium
++
++                Label {
++                    text: Qt.formatTime(dateHeader.currentDate, "hh:mm")
++                    color: Theme.primaryColor
++                    font {
++                        family: Theme.fontFamilyHeading
++                        pixelSize: Theme.fontSizeMedium
++                    }
++                }
++
++                Label {
++                    text: Qt.formatDate(dateHeader.currentDate, "ddd d.M.yyyy")
++                    color: Theme.primaryColor
++                    font {
++                        family: Theme.fontFamilyHeading
++                        pixelSize: Theme.fontSizeMedium
++                    }
++                }
++            }
++
++            Timer {
++                interval: 60000
++                repeat: true
++                running: topMenu.exposed
++                triggeredOnStart: true
++                onTriggered: dateHeader.currentDate = new Date()
++            }
++        }
++
+         Item {
+             width: topMenu.width
+             height: topMenu.itemSize

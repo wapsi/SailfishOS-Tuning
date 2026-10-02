@@ -1,0 +1,17 @@
+This patch has been tested on SailfishOS 5.2.0.17, 5.2.0.18
+
+This patch adds time & date into the Sailfish/Lipstick's Top Bar, so the time and date can be easily checked by sliding the top bar menu while you're actively using some app etc. See the screenshot.
+
+Copy DateTimeToTopBarPatch.patch to your Sailfish device
+
+To install this patch, run the following commands:
+devel-su
+cp -a /usr/share/lipstick-jolla-home-qt5/topmenu/TopMenu.qml /home/defaultuser/TopMenu.qml.orig # Take backup of the original file
+cd /
+patch --dry-run p1 < /home/defaultuser/DateTimeToTopBarPatch.patch # Check that everything is ready to go
+patch p1 < /home/defaultuser/DateTimeToTopBarPatch.patch # Actual patching
+systemctl --user restart lipstick
+
+Now try to open your top menu
+
+Note: SailfishOS updates will overwrite this patch so it needs to be done again after each update.
