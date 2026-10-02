@@ -1,0 +1,53 @@
+# This guide helps you to schedule No-not-Disturb to be turned on and off on specific times (like during weekday nights or similar)
+
+# Thanks to: https://forum.sailfishos.org/t/do-not-disturb-active-hours/7607
+
+# Create files:
+
+### .config/systemd/user/dnd-activate.service:
+[Unit]
+Description=Do-not-Disturb mode toggle
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/dconf write '/lipstick/do_not_disturb' 'true'
+
+### .config/systemd/user/dnd-activate.timer
+[Unit]
+Description=Do-not-Disturb mode Activation
+
+[Timer]
+OnCalendar=Sun 22:30
+OnCalendar=Mon..Thu 22:30
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+
+### .config/systemd/user/dnd-deactivate.service
+[Unit]
+Description=Do-not-Disturb mode toggle
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+ExecStart=/usr/bin/dconf write '/lipstick/do_not_disturb' 'false'
+
+### .config/systemd/user/dnd-deactivate.timer
+[Unit]
+Description=Do-not-Disturb mode Deactivation
+
+[Timer]
+OnCalendar=Mon..Fri 06:30
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+
+
+# Execute as "defaultuser":
+systemctl --user daemon-reload
+systemctl --user enable dnd-activate.timer
+systemctl --user start dnd-activate.timer
+systemctl --user enable dnd-deactivate.timer
+systemctl --user start dnd-deactivate.timer
