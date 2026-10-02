@@ -1,0 +1,12 @@
+[Unit]
+Description=Proactively restart OBEX on Bluetooth device connection
+After=bluetooth.target dbus.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/defaultuser/Scripts/BtObexRestartHack/BtObexRestartHack.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

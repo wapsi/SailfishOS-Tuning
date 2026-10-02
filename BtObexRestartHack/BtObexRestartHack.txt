@@ -1,0 +1,22 @@
+# First make sure that "Send incoming pairing requests to AppSupport" is turned off! If it's turned on, the car/phone can ask for repairing with new PIN and it messes up the pairing! You don't need that to turned on except when you're performing a new pairing with some Android App
+
+# Pair your mobile with the car's BT so that the first contacts sync is successful and all BT profiles (headset, audio playback) are working properly. If the contact import fails, try to restart obex as defaultuser: systemctl --user restart obex and retry to pairing again (by putting your phone in discoverable mode and starting the pairing from the car)
+
+# Run as root (when the BT connection is active?, you can find the car MAC address by checking cat /var/lib/bluetooth/<mobile's MAC address>/<car's BT address>/info -> in info file there should be the car's BT name visible):
+pkcon install bluez5-tools
+bluetoothctl trust <car's BT mac address>
+
+# Modify the correct BT MAC address(es) into BtObexRestartHack.py file
+
+# Copy BtObexRestartHack and its content to /home/defaultuser/Scripts/BtObexRestartHack
+
+# Copy /home/defaultuser/Scripts/BtObexRestartHack/bt-obex-restart-hack.service to /home/defaultuser/.config/systemd/user/bt-obex-restart-hack.service
+
+# Run (as defaultuser):
+systemctl --user daemon-reload
+systemctl --user enable --now bt-obex-restart-hack.service
+
+# Follow the log (as root user):
+journalctl -f _SYSTEMD_USER_UNIT=bt-obex-restart-hack.service
+
+# Try to start you car and see the logs when it connects to your phone and synchronizes contacts
